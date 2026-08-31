@@ -1,0 +1,6 @@
+.build/
+*.app/
+.DS_Store
+
+# Compiled scratch binary for nl.swift
+/nl
