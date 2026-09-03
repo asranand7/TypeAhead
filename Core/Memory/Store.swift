@@ -467,6 +467,58 @@ public final class Store {
             }
     }
 
+    /// Removes a word and everything that referred to it.
+    ///
+    /// `DELETE FROM vocab` alone is not "forget" — it is worse than keeping the
+    /// word. `vocab.id` is a rowid alias, so deleting the highest-numbered row
+    /// frees that id for the next word learned, and every n-gram that pointed at
+    /// the deleted word silently starts pointing at the new one. Deleting the
+    /// word you just typed by mistake is exactly the case that triggers it, and
+    /// it is exactly the case the review window exists for.
+    ///
+    /// So the statistics go first, in one transaction: rows where the word is the
+    /// prediction, and rows where it is either half of the context. A context row
+    /// left behind would keep predicting from a word that no longer exists, which
+    /// is merely useless — but it would also be re-pointed by the same rowid
+    /// reuse, which is not.
+    ///
+    /// Phrases containing the word go too. A snippet is offered verbatim, so
+    /// leaving "Thanks, Anand" behind after forgetting "Anand" would put the word
+    /// back on screen and make the deletion look ignored.
+    public func forgetWord(_ word: String) throws {
+        let normalized = PersonalModel.normalize(word)
+        guard !normalized.isEmpty else { return }
+
+        try database.execute("BEGIN IMMEDIATE")
+        do {
+            let rows = try database.query("SELECT id FROM vocab WHERE word = ?",
+                                          [.text(normalized)])
+            guard let id = rows.first?.int("id") else {
+                try database.execute("COMMIT")
+                return
+            }
+
+            try database.execute(
+                "DELETE FROM ngram WHERE next_id = ? OR prev1 = ? OR prev2 = ?",
+                [.integer(id), .integer(id), .integer(id)])
+
+            // Word-boundary match, so forgetting "an" does not delete every
+            // phrase containing "many".
+            for snippet in try allSnippets()
+                where PredictionMetrics.normalizedWords(snippet.text).contains(normalized) {
+                try database.execute("DELETE FROM snippet WHERE text = ?", [.text(snippet.text)])
+            }
+
+            try database.execute("DELETE FROM correction WHERE wrong = ? OR right = ?",
+                                 [.text(normalized), .text(normalized)])
+            try database.execute("DELETE FROM vocab WHERE id = ?", [.integer(id)])
+            try database.execute("COMMIT")
+        } catch {
+            try? database.execute("ROLLBACK")
+            throw error
+        }
+    }
+
     public func allSnippets() throws -> [Snippet] {
         try database.query("SELECT text, count, source FROM snippet ORDER BY count DESC")
             .map {

@@ -210,3 +210,70 @@ func runMigrationTests(_ s: Suite) {
                  "a store already migrated keeps its statistics")
     }
 }
+
+func runForgetTests(_ s: Suite) {
+    s.report("Forgetting a word")
+
+    s.test("forgetting removes the statistics that referred to it") {
+        let (store, _) = try makeTemporaryStore()
+        let alpha = try store.recordWord("alpha")
+        let beta = try store.recordWord("beta")
+        let gamma = try store.recordWord("gamma")
+        try store.recordNgram(prev2: alpha, prev1: beta, next: gamma, app: "")
+        try store.recordNgram(prev2: beta, prev1: gamma, next: alpha, app: "")
+
+        try store.forgetWord("gamma")
+
+        let rows = try store.database.query(
+            "SELECT COUNT(*) AS n FROM ngram WHERE next_id = ? OR prev1 = ? OR prev2 = ?",
+            [.integer(gamma), .integer(gamma), .integer(gamma)])
+        s.expectEqual(Int(rows.first?.int("n") ?? -1), 0,
+                      "no n-gram still refers to the forgotten word")
+        s.expect(!(try store.allVocab().map(\.word).contains("gamma")), "word is gone")
+        s.expect(try store.allVocab().map(\.word).contains("alpha"), "others untouched")
+    }
+
+    s.test("a forgotten word cannot come back wearing a new word's name") {
+        // vocab.id is a rowid alias. Deleting the highest-numbered row frees that
+        // id, and the next word learned is handed it — so every n-gram that
+        // pointed at the deleted word silently starts pointing at the new one.
+        // Deleting the word you just mistyped is precisely what triggers it.
+        let (store, _) = try makeTemporaryStore()
+        let a = try store.recordWord("alpha")
+        let b = try store.recordWord("beta")
+        let doomed = try store.recordWord("secret")
+        try store.recordNgram(prev2: a, prev1: b, next: doomed, app: "")
+
+        try store.forgetWord("secret")
+        let reused = try store.recordWord("innocent")
+
+        if reused == doomed {
+            // The id really was recycled — so the guarantee has to come from the
+            // statistics having been deleted, not from the id being unique.
+            let rows = try store.continuations(prev2: a, prev1: b, app: "")
+            s.expect(!rows.contains { $0.word == "innocent" },
+                     "the new word did not inherit the forgotten one's predictions")
+        }
+        s.expect(true, "rowid reuse checked")
+    }
+
+    s.test("forgetting takes phrases containing the word, but not lookalikes") {
+        let (store, _) = try makeTemporaryStore()
+        _ = try store.recordWord("anand")
+        try store.recordSnippet("Thanks, Anand", source: "auto")
+        try store.recordSnippet("Please find attached", source: "auto")
+        // Substring, not a word: forgetting "an" must not take this with it.
+        _ = try store.recordWord("an")
+        try store.recordSnippet("many happy returns", source: "auto")
+
+        try store.forgetWord("anand")
+        let remaining = try store.allSnippets().map(\.text)
+        s.expect(!remaining.contains("Thanks, Anand"), "phrase containing the word is gone")
+        s.expect(remaining.contains("Please find attached"), "unrelated phrase kept")
+
+        try store.forgetWord("an")
+        let after = try store.allSnippets().map(\.text)
+        s.expect(after.contains("many happy returns"),
+                 "a phrase merely containing the letters is kept")
+    }
+}

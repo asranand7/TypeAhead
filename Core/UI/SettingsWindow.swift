@@ -19,7 +19,12 @@ public final class SettingsWindow: NSObject, NSWindowDelegate {
 
     // Controls that need updating as state changes.
     private var statusLabel = NSTextField(labelWithString: "")
-    private var learnedLabel = NSTextField(labelWithString: "")
+    /// Wrapping, not plain. `NSTextField(labelWithString:)` is single-line by
+    /// construction, so `maximumNumberOfLines` on it does nothing and the sentence
+    /// was truncated mid-word at the pane edge — "an unfamiliar one needs 4" lost
+    /// its ending. This label is the app explaining why it has nothing to suggest
+    /// yet, which is exactly the message that must not be cut off.
+    private var learnedLabel = NSTextField(wrappingLabelWithString: "")
     private var modelTable = NSTableView()
     private var modelStatusLabel = NSTextField(labelWithString: "")
     private var blockTable = NSTableView()
@@ -141,14 +146,26 @@ public final class SettingsWindow: NSObject, NSWindowDelegate {
         statusLabel.frame = NSRect(x: 24, y: y, width: 560, height: 20)
         statusLabel.font = .systemFont(ofSize: 13, weight: .medium)
         view.addSubview(statusLabel)
-        y -= 24
 
-        learnedLabel.frame = NSRect(x: 24, y: y, width: 560, height: 40)
+        // The advance has to clear the height of the element it is making room
+        // for, not the one just placed. An AppKit view is positioned by its
+        // bottom-left corner and extends *upward*, so a 40pt label dropped 24pt
+        // below a label rides 16pt back up into it — which is exactly what these
+        // two did: "Watching — N keystrokes saved" and "Knows N words…" were
+        // drawn on top of each other. Every other advance in this pane happens to
+        // exceed the height below it, which is why it was the only pair affected.
+        y -= 38
+
+        // Two lines, not three. At 11pt across 560pt this sentence has never
+        // needed more than two, and the third line was pure overlap budget.
+        learnedLabel.frame = NSRect(x: 24, y: y, width: 560, height: 32)
         learnedLabel.font = .systemFont(ofSize: 11)
         learnedLabel.textColor = .secondaryLabelColor
-        learnedLabel.maximumNumberOfLines = 3
+        learnedLabel.maximumNumberOfLines = 2
+        learnedLabel.lineBreakMode = .byWordWrapping
+        learnedLabel.isSelectable = false
         view.addSubview(learnedLabel)
-        y -= 48
+        y -= 44
 
         // Separates "nothing to suggest" from "suggesting but invisible" — the two
         // failures that look identical from the user's chair.
