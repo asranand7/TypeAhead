@@ -30,8 +30,16 @@ final class TypeAheadInputController: IMKInputController {
     private var phraseRemainder: String?
     private var pendingWork: DispatchWorkItem?
 
-    /// A local echo of the current word, used when the client will not report its
-    /// own contents. Reset whenever continuity is lost.
+    /// A local echo of what has been typed, used when the client will not report
+    /// its own contents. Reset whenever continuity is lost.
+    ///
+    /// Two levels, because they answer different questions. `buffer` is the
+    /// running text and is what the predictor conditions on; `partialWord` is the
+    /// token under construction and is what gets announced when a separator ends
+    /// it. Previously there was only the second, which meant the input method's
+    /// entire context was the half-typed word — no preceding sentence, no
+    /// preceding word, nothing for an n-gram or a snippet to match against.
+    private var buffer = ""
     private var partialWord = ""
 
     private var engine: IMEngine { IMEngine.shared }
@@ -61,6 +69,7 @@ final class TypeAheadInputController: IMKInputController {
 
         case kVK_Delete:
             clearSuggestion(client)
+            if !buffer.isEmpty { buffer.removeLast() }
             if !partialWord.isEmpty { partialWord.removeLast() }
             engine.observe(.backspaced)
             schedulePrediction(client)
@@ -69,6 +78,9 @@ final class TypeAheadInputController: IMKInputController {
         case kVK_LeftArrow, kVK_RightArrow, kVK_UpArrow, kVK_DownArrow:
             clearSuggestion(client)
             commitPartialWord()
+            // The caret moved somewhere we did not put it, so the echo no longer
+            // matches the document. Stale context is worse than none.
+            buffer = ""
             engine.observe(.caretMoved)
             return false
 
@@ -205,8 +217,8 @@ final class TypeAheadInputController: IMKInputController {
             }
         }
 
-        return TypingContext(textBeforeCaret: partialWord,
-                             currentWordPrefix: ContextReader.trailingWord(of: partialWord),
+        return TypingContext(textBeforeCaret: buffer,
+                             currentWordPrefix: ContextReader.trailingWord(of: buffer),
                              appBundleID: bundleID,
                              isAuthoritative: false)
     }
@@ -218,24 +230,31 @@ final class TypeAheadInputController: IMKInputController {
         engine.observe(.typed(characters))
 
         for character in characters {
+            buffer.append(character)
             if let scalar = character.unicodeScalars.first,
                ContextReader.isWordCharacter(scalar) {
                 partialWord.append(character)
             } else {
-                commitPartialWord()
+                let boundary = TextBoundary(separator: character)
+                if partialWord.isEmpty {
+                    if boundary.endsSentence { engine.observe(.boundaryCrossed(boundary)) }
+                } else {
+                    commitPartialWord(endedBy: boundary)
+                }
             }
         }
-        if partialWord.count > ContextReader.maxContextChars {
-            partialWord.removeFirst(partialWord.count - ContextReader.maxContextChars)
+        if buffer.count > ContextReader.maxContextChars {
+            buffer.removeFirst(buffer.count - ContextReader.maxContextChars)
         }
     }
 
-    private func commitPartialWord() {
+    private func commitPartialWord(endedBy boundary: TextBoundary = .none) {
         guard !partialWord.isEmpty else { return }
         let word = partialWord
         partialWord = ""
         engine.observe(.wordCommitted(
             word: word,
+            boundary: boundary,
             appBundleID: NSWorkspace.shared.frontmostApplication?.bundleIdentifier))
     }
 
@@ -246,6 +265,7 @@ final class TypeAheadInputController: IMKInputController {
             clearSuggestion(client)
         }
         commitPartialWord()
+        buffer = ""
         engine.observe(.caretMoved)
         super.deactivateServer(sender)
     }

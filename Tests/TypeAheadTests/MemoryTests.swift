@@ -18,7 +18,7 @@ func runMemoryTests(_ s: Suite) {
         // A name is in no dictionary, so it must clear the higher bar for
         // unrecognised words before it is offered — see WordHygiene.
         for _ in 0..<WordHygiene.unknownWordThreshold {
-            model.observe(.wordCommitted(word: "chaudhary", appBundleID: nil))
+            model.observe(.wordCommitted(word: "chaudhary", boundary: .space, appBundleID: nil))
             model.observe(.caretMoved)
         }
 
@@ -35,7 +35,7 @@ func runMemoryTests(_ s: Suite) {
         // One sighting is as likely to be a typo as a word.
         let (store, _) = try makeTemporaryStore()
         let model = PersonalModel(store: store)
-        model.observe(.wordCommitted(word: "provisional", appBundleID: nil))
+        model.observe(.wordCommitted(word: "provisional", boundary: .space, appBundleID: nil))
 
         let context = TypingContext(textBeforeCaret: "provis",
                                     currentWordPrefix: "provis",
@@ -50,9 +50,9 @@ func runMemoryTests(_ s: Suite) {
 
         for _ in 0..<3 {
             model.observe(.caretMoved)
-            model.observe(.wordCommitted(word: "kaise", appBundleID: nil))
-            model.observe(.wordCommitted(word: "ho", appBundleID: nil))
-            model.observe(.wordCommitted(word: "bhai", appBundleID: nil))
+            model.observe(.wordCommitted(word: "kaise", boundary: .space, appBundleID: nil))
+            model.observe(.wordCommitted(word: "ho", boundary: .space, appBundleID: nil))
+            model.observe(.wordCommitted(word: "bhai", boundary: .space, appBundleID: nil))
         }
 
         let context = TypingContext(textBeforeCaret: "kaise ho ",
@@ -69,7 +69,7 @@ func runMemoryTests(_ s: Suite) {
         let (store, _) = try makeTemporaryStore()
         let model = PersonalModel(store: store)
         for _ in 0..<2 {
-            model.observe(.wordCommitted(word: "नमस्ते", appBundleID: nil))
+            model.observe(.wordCommitted(word: "नमस्ते", boundary: .space, appBundleID: nil))
             model.observe(.caretMoved)
         }
         s.expectEqual(try store.wordCount("नमस्ते"), 2, "Devanagari word counted")
@@ -81,13 +81,13 @@ func runMemoryTests(_ s: Suite) {
 
         for _ in 0..<3 {
             model.observe(.caretMoved)
-            model.observe(.wordCommitted(word: "hey", appBundleID: "com.slack"))
-            model.observe(.wordCommitted(word: "team", appBundleID: "com.slack"))
+            model.observe(.wordCommitted(word: "hey", boundary: .space, appBundleID: "com.slack"))
+            model.observe(.wordCommitted(word: "team", boundary: .space, appBundleID: "com.slack"))
         }
         for _ in 0..<3 {
             model.observe(.caretMoved)
-            model.observe(.wordCommitted(word: "hey", appBundleID: "com.mail"))
-            model.observe(.wordCommitted(word: "there", appBundleID: "com.mail"))
+            model.observe(.wordCommitted(word: "hey", boundary: .space, appBundleID: "com.mail"))
+            model.observe(.wordCommitted(word: "there", boundary: .space, appBundleID: "com.mail"))
         }
 
         let slack = model.suggest(TypingContext(textBeforeCaret: "hey ",
@@ -113,7 +113,7 @@ func runMemoryTests(_ s: Suite) {
         let phrase = ["let", "me", "know", "if", "that", "works"]
         for _ in 0..<(SnippetMiner.promotionThreshold - 1) {
             miner.observe(.caretMoved)
-            for word in phrase { miner.observe(.wordCommitted(word: word, appBundleID: nil)) }
+            for word in phrase { miner.observe(.wordCommitted(word: word, boundary: .space, appBundleID: nil)) }
         }
 
         let early = source.suggest(TypingContext(textBeforeCaret: "let me know",
@@ -123,7 +123,7 @@ func runMemoryTests(_ s: Suite) {
         s.expect(early.isEmpty, "not promoted below the threshold")
 
         miner.observe(.caretMoved)
-        for word in phrase { miner.observe(.wordCommitted(word: word, appBundleID: nil)) }
+        for word in phrase { miner.observe(.wordCommitted(word: word, boundary: .space, appBundleID: nil)) }
 
         let promoted = try miner.promoted()
         s.expect(promoted.contains { $0.text == "let me know if that works" },
@@ -136,9 +136,9 @@ func runMemoryTests(_ s: Suite) {
         let (store, _) = try makeTemporaryStore()
         let miner = SnippetMiner(store: store)
 
-        for word in ["alpha", "beta"] { miner.observe(.wordCommitted(word: word, appBundleID: nil)) }
+        for word in ["alpha", "beta"] { miner.observe(.wordCommitted(word: word, boundary: .space, appBundleID: nil)) }
         miner.observe(.caretMoved)
-        for word in ["gamma", "delta"] { miner.observe(.wordCommitted(word: word, appBundleID: nil)) }
+        for word in ["gamma", "delta"] { miner.observe(.wordCommitted(word: word, boundary: .space, appBundleID: nil)) }
 
         let all = try store.allSnippets()
         s.expect(!all.contains { $0.text.contains("beta gamma") },
@@ -183,10 +183,10 @@ func runMemoryTests(_ s: Suite) {
 
         for _ in 0..<Corrector.minimumEvidence {
             corrector.observe(.caretMoved)
-            corrector.observe(.wordCommitted(word: "recieve", appBundleID: nil))
+            corrector.observe(.wordCommitted(word: "recieve", boundary: .space, appBundleID: nil))
             for _ in 0..<("recieve".count + 1) { corrector.observe(.backspaced) }
             corrector.observe(.typed("r"))
-            corrector.observe(.wordCommitted(word: "receive", appBundleID: nil))
+            corrector.observe(.wordCommitted(word: "receive", boundary: .space, appBundleID: nil))
         }
 
         let pair = try store.correction(for: "recieve")

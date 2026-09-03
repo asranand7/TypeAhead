@@ -37,9 +37,9 @@ cat > "$APP_DIR/Info.plist" << 'PLIST'
     <key>CFBundlePackageType</key>
     <string>APPL</string>
     <key>CFBundleShortVersionString</key>
-    <string>0.1</string>
+    <string>0.2</string>
     <key>CFBundleVersion</key>
-    <string>1</string>
+    <string>2</string>
     <key>LSMinimumSystemVersion</key>
     <string>14.0</string>
     <key>NSHighResolutionCapable</key>
@@ -81,7 +81,14 @@ codesign --verify --deep --strict --verbose=2 "$APP_NAME.app"
 
 echo "📍 Installing to /Applications..."
 pkill -f "$APP_NAME\.app/Contents/MacOS/$APP_NAME$" 2>/dev/null || true
-sleep 0.5
+
+# And the model server it spawned. Killing the app alone orphans llama-server —
+# it reparents to launchd and keeps port 8177 bound, so the next launch spawns a
+# server that cannot bind, exits immediately, and leaves the app holding a dead
+# Process while health checks pass against the orphan. The model tier then
+# reports itself running and answers nothing.
+pkill -f "llama-server.*--port 8177" 2>/dev/null || true
+sleep 1
 
 rm -rf "/Applications/$APP_NAME.app"
 cp -R "$APP_NAME.app" /Applications/

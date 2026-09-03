@@ -64,10 +64,10 @@ func runBackoffTests(_ s: Suite) {
         let (store, _) = try makeTemporaryStore()
         let model = PersonalModel(store: store)
         for _ in 0..<3 {
-            model.observe(.wordCommitted(word: "please", appBundleID: nil))
-            model.observe(.wordCommitted(word: "find", appBundleID: nil))
-            model.observe(.wordCommitted(word: "attached", appBundleID: nil))
-            model.observe(.wordCommitted(word: "the", appBundleID: nil))
+            model.observe(.wordCommitted(word: "please", boundary: .space, appBundleID: nil))
+            model.observe(.wordCommitted(word: "find", boundary: .space, appBundleID: nil))
+            model.observe(.wordCommitted(word: "attached", boundary: .space, appBundleID: nil))
+            model.observe(.wordCommitted(word: "the", boundary: .space, appBundleID: nil))
             model.observe(.caretMoved)
         }
 

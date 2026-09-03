@@ -51,7 +51,7 @@ func runSnippetTests(_ s: Suite) {
         let (store, _) = try makeTemporaryStore()
         let miner = SnippetMiner(store: store)
         for word in ["let", "me", "know"] {
-            miner.observe(.wordCommitted(word: word, appBundleID: nil))
+            miner.observe(.wordCommitted(word: word, boundary: .space, appBundleID: nil))
         }
         let texts = try store.allSnippets().map(\.text)
         s.expect(!texts.contains { $0.split(separator: " ").count < SnippetMiner.minimumWords },

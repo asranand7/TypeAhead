@@ -68,7 +68,7 @@ func runHygieneTests(_ s: Suite) {
 
         // A typo, typed twice — enough for the old evidence bar, not enough now.
         for _ in 0..<2 {
-            model.observe(.wordCommitted(word: "anhting", appBundleID: nil))
+            model.observe(.wordCommitted(word: "anhting", boundary: .space, appBundleID: nil))
             model.observe(.caretMoved)
         }
         let typo = model.suggest(TypingContext(textBeforeCaret: "anht",
@@ -79,7 +79,7 @@ func runHygieneTests(_ s: Suite) {
 
         // A real word, typed twice, is offered.
         for _ in 0..<2 {
-            model.observe(.wordCommitted(word: "attached", appBundleID: nil))
+            model.observe(.wordCommitted(word: "attached", boundary: .space, appBundleID: nil))
             model.observe(.caretMoved)
         }
         let real = model.suggest(TypingContext(textBeforeCaret: "attac",
@@ -94,7 +94,7 @@ func runHygieneTests(_ s: Suite) {
         let model = PersonalModel(store: store)
 
         for _ in 0..<WordHygiene.unknownWordThreshold {
-            model.observe(.wordCommitted(word: "chaudhary", appBundleID: nil))
+            model.observe(.wordCommitted(word: "chaudhary", boundary: .space, appBundleID: nil))
             model.observe(.caretMoved)
         }
         let candidates = model.suggest(TypingContext(textBeforeCaret: "chaud",
@@ -109,10 +109,10 @@ func runHygieneTests(_ s: Suite) {
         let (store, _) = try makeTemporaryStore()
         let model = PersonalModel(store: store)
 
-        model.observe(.wordCommitted(word: "anhting", appBundleID: nil))
+        model.observe(.wordCommitted(word: "anhting", boundary: .space, appBundleID: nil))
         for _ in 0..<3 {
             model.observe(.caretMoved)
-            model.observe(.wordCommitted(word: "attached", appBundleID: nil))
+            model.observe(.wordCommitted(word: "attached", boundary: .space, appBundleID: nil))
         }
 
         let removed = try store.forgetUnverified(seenFewerThan: WordHygiene.unknownWordThreshold)
@@ -225,7 +225,7 @@ func runLexiconTests(_ s: Suite) {
         let (store, _) = try makeTemporaryStore()
         let personal = PersonalModel(store: store)
         for _ in 0..<3 {
-            personal.observe(.wordCommitted(word: "receipts", appBundleID: nil))
+            personal.observe(.wordCommitted(word: "receipts", boundary: .space, appBundleID: nil))
             personal.observe(.caretMoved)
         }
 

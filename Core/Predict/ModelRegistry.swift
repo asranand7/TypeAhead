@@ -61,6 +61,21 @@ public final class ModelRegistry {
         .none
     ]
 
+    /// What a fresh install runs.
+    ///
+    /// Not "none". Memory-only was the default for as long as the model tier
+    /// existed, which meant the shipping app had no language model in it at all —
+    /// every suggestion came from n-gram counts, a prefix trie and the system
+    /// spell checker. That is a 1990s recommender, and it is what "it just
+    /// recommends stuff" was describing.
+    ///
+    /// The smallest catalog entry is the right default because it is the one that
+    /// fits the keystroke budget: measured on an M5, Qwen3-0.6B answers a
+    /// one-word completion in ~23ms against a 40ms debounce, with the prompt
+    /// cache warm. Memory-only remains a first-class choice, and remains what the
+    /// app falls back to whenever the model cannot be loaded.
+    public static let defaultEntryID = "qwen3-0.6b"
+
     public private(set) var active: GGUFModel?
     public private(set) var activeEntryID: String
     /// Why the last activation failed. Surfaced to the user rather than letting a
@@ -83,7 +98,8 @@ public final class ModelRegistry {
         self.engine = engine
         self.defaults = defaults
         self.rebuildSources = rebuildSources
-        self.activeEntryID = defaults.string(forKey: ModelRegistry.activeKey) ?? "none"
+        self.activeEntryID = defaults.string(forKey: ModelRegistry.activeKey)
+            ?? ModelRegistry.defaultEntryID
     }
 
     // MARK: - Storage
@@ -206,17 +222,54 @@ public final class ModelRegistry {
     }
 
     /// Restores the model chosen last session. Called at launch.
+    ///
+    /// Loads in place when the weights are already on disk — memory-mapping a
+    /// cached model is fast enough to do before the first keystroke. When they
+    /// are not, the fetch runs in the background and the app starts on memory
+    /// alone, exactly as it always did, then picks the model up when it arrives.
+    ///
+    /// This split is what lets the model be on by default. Making it default
+    /// without it would put a 640MB download in front of first launch, and an
+    /// app that hangs on startup gets uninstalled before it ever suggests
+    /// anything.
     public func restoreActive() {
         guard activeEntryID != "none" else { return }
-        if let entry = ModelRegistry.catalog.first(where: { $0.id == activeEntryID }),
-           isInstalled(entry) {
-            _ = activate(entry)
+
+        if let entry = ModelRegistry.catalog.first(where: { $0.id == activeEntryID }) {
+            if isInstalled(entry) {
+                _ = activate(entry)
+            } else {
+                downloadInBackground(entry)
+            }
             return
         }
         if let custom = installedModelPaths().first(where: {
             $0.deletingPathExtension().lastPathComponent == activeEntryID
         }) {
             _ = activate(path: custom, entryID: activeEntryID)
+        }
+    }
+
+    /// Whether a first-run fetch is in flight, so the menu can say so rather than
+    /// showing "no model" and looking broken.
+    public private(set) var isFetching = false
+
+    private func downloadInBackground(_ entry: CatalogEntry) {
+        guard GGUFModel.isRuntimeAvailable else {
+            lastError = "llama-server is not installed. Try: brew install llama.cpp"
+            return
+        }
+        isFetching = true
+        DispatchQueue.global(qos: .utility).async { [weak self] in
+            guard let self else { return }
+            let started = self.activate(entry)
+            DispatchQueue.main.async {
+                self.isFetching = false
+                // A failed first fetch must not strand the app pointing at a model
+                // it does not have: fall back to memory-only and say why.
+                if !started { _ = self.activate(path: nil, entryID: "none") }
+                self.rebuildSources()
+            }
         }
     }
 

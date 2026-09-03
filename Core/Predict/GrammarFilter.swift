@@ -148,16 +148,22 @@ public enum GrammarFilter {
         return tagger.tag(at: range.lowerBound, unit: .word, scheme: .lexicalClass).0
     }
 
-    /// The completed word immediately before the one being typed.
+    /// The completed word immediately before the one being typed, or nil when a
+    /// sentence boundary sits between them.
+    ///
+    /// The boundary check is what stops a constraint leaking across a full stop.
+    /// Splitting on non-letters discards punctuation along with spaces, so
+    /// "Let me know if you can. Regar…" reported "can" as the preceding word and
+    /// the filter dutifully demanded a base-form verb for a word that starts a
+    /// new sentence. Nothing before a full stop governs anything after it.
     public static func precedingWord(in context: String, before prefix: String) -> String? {
         var text = context
         // Drop the partial word so the *previous* one is found, not this one.
         if !prefix.isEmpty, text.lowercased().hasSuffix(prefix.lowercased()) {
             text = String(text.dropLast(prefix.count))
         }
-        let words = text
-            .split(whereSeparator: { !$0.isLetter && $0 != "'" })
-            .map { $0.lowercased() }
-        return words.last
+        guard let last = PersonalModel.tokens(of: text).last,
+              !PersonalModel.BoundaryToken.isBoundary(last) else { return nil }
+        return last
     }
 }
