@@ -23,11 +23,27 @@ let identity = IdentitySource(store: store)
 let corrector = Corrector(store: store)
 let lexicon = SystemLexicon()
 
+// A model already serving on the app's port, if there is one. Attached rather
+// than spawned: the doctor must never start a second 640MB server behind the
+// running app's back.
+let attachedModel: GGUFModel? = {
+    let probe = GGUFModel(name: "attached", source: .local(path: ""), port: 8177)
+    return probe.attach() ? probe : nil
+}()
+
+// Assembled exactly as TypeAheadApp assembles it — Fusion, not the personal
+// model and the language model as two separate registrations. A diagnostic that
+// wires the pipeline differently from the app reports on a pipeline nobody runs,
+// which is worse than reporting nothing: it was pooling the two sources and
+// ranking them against each other, which is the arrangement the app stopped
+// using in v0.2.0.
+let fusion = Fusion(personal: personal, model: { attachedModel })
+
 let engine = SuggestionEngine()
 engine.register(identity)
 engine.register(corrector)
 engine.register(snippets)
-engine.register(personal)
+engine.register(fusion)
 engine.register(lexicon)
 
 func probe(_ text: String) {
@@ -56,8 +72,7 @@ func probe(_ text: String) {
 // If a llama-server is already up, exercise the real model path and report what
 // it returns and how long it takes. This is the only honest answer to "is the
 // model actually being used".
-let probeModel = GGUFModel(name: "attached", source: .local(path: ""), port: 8177)
-if probeModel.attach() {
+if let probeModel = attachedModel {
     print("Model: llama-server responding on 127.0.0.1:8177")
     for text in ["Please find attached the ", "Thanks for your ", "kaise ho "] {
         let ctx = TypingContext(textBeforeCaret: text, currentWordPrefix: "",
@@ -70,7 +85,6 @@ if probeModel.attach() {
             : candidates.map { "\"\($0.text)\" p=\($0.probability)" }.joined(separator: ", ")
         print(String(format: "  %-28@ → %@  [%.0fms]", "\"\(text)\"" as NSString, shown as NSString, ms))
     }
-    engine.register(probeModel)
     print("")
 } else {
     print("Model: no llama-server on 127.0.0.1:8177 — memory only")
