@@ -31,7 +31,12 @@ public final class SnippetMiner: TypingObserver {
 
     private let store: Store
     private let lock = NSLock()
-    private var recent: [String] = []
+
+    /// The words of the sentence in progress, each with the separator that ended
+    /// it. The separator is what makes a mined phrase reproducible: without it
+    /// "Thanks, Anand" was stored as "Thanks Anand" and could never be matched
+    /// against a tail that still had its comma.
+    private var recent: [(word: String, boundary: TextBoundary)] = []
 
     public init(store: Store) {
         self.store = store
@@ -39,8 +44,14 @@ public final class SnippetMiner: TypingObserver {
 
     public func observe(_ signal: TypingSignal) {
         switch signal {
-        case .wordCommitted(let word, _):
-            record(word)
+        case .wordCommitted(let word, let boundary, _):
+            record(word, boundary: boundary)
+        case .boundaryCrossed:
+            // The sentence ended on a separator that closed no word — the comma
+            // in "Hi John,\n\n" got there first. The phrase still ends here.
+            lock.lock()
+            recent.removeAll()
+            lock.unlock()
         case .caretMoved:
             // The caret jumped, so words either side of the jump were never
             // adjacent. Joining them would mine phrases the user never typed.
@@ -52,16 +63,20 @@ public final class SnippetMiner: TypingObserver {
         }
     }
 
-    private func record(_ word: String) {
+    private func record(_ word: String, boundary: TextBoundary) {
         let cleaned = word.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !cleaned.isEmpty else { return }
 
         lock.lock()
-        recent.append(cleaned)
+        recent.append((cleaned, boundary))
         if recent.count > SnippetMiner.maximumWords {
             recent.removeFirst(recent.count - SnippetMiner.maximumWords)
         }
         let window = recent
+        // A sentence or paragraph break ends the phrase. Everything after it
+        // belongs to a different one, and joining across it is what produced
+        // "the update Please find" — three words the user never typed in a row.
+        if boundary.endsSentence || boundary == .none { recent.removeAll() }
         lock.unlock()
 
         // Every trailing sequence long enough to qualify. Counting all lengths
@@ -69,9 +84,25 @@ public final class SnippetMiner: TypingObserver {
         // early to a fixed size.
         guard window.count >= SnippetMiner.minimumWords else { return }
         for length in SnippetMiner.minimumWords...window.count {
-            let phrase = window.suffix(length).joined(separator: " ")
+            let phrase = SnippetMiner.phrase(from: Array(window.suffix(length)))
+            guard !phrase.isEmpty else { continue }
             try? store.recordSnippet(phrase, source: "auto")
         }
+    }
+
+    /// Renders mined words back into the phrase they came from.
+    ///
+    /// Each word carries the separator that ended it, so the punctuation the user
+    /// typed survives into the stored phrase. The *last* word's separator is
+    /// dropped: the phrase ends there, and a stored trailing ", " would put a
+    /// comma into every completion that took it.
+    static func phrase(from words: [(word: String, boundary: TextBoundary)]) -> String {
+        var out = ""
+        for (index, entry) in words.enumerated() {
+            out += entry.word
+            if index < words.count - 1 { out += entry.boundary.separatorText }
+        }
+        return out
     }
 
     /// How much of a phrase's weight an extension must carry before the shorter
@@ -146,14 +177,48 @@ public final class SnippetSource: SuggestionSource {
         }
     }
 
-    /// The text since the last sentence boundary, which is what a snippet is
-    /// matched against. Anything earlier is a different sentence.
+    /// The text since the last sentence boundary, rendered exactly the way a
+    /// mined phrase is, so the two can be compared at all.
+    ///
+    /// Both halves of the match have to speak the same alphabet. Phrases are
+    /// stored with canonical separators, so the tail has to be rebuilt with them
+    /// too — otherwise a comma is enough to make a match impossible, which is
+    /// what used to happen: "Thanks, " was matched literally against phrases
+    /// stored as "Thanks Anand" and never hit, so typing a comma silently
+    /// switched off the highest-value tier in the app.
+    ///
+    /// Canonicalising also normalises how the break was typed. "Thanks,Anand",
+    /// "Thanks, Anand" and "Thanks ,  Anand" all reduce to "Thanks, Anand", so
+    /// they reinforce one snippet instead of splitting into three.
+    ///
+    /// Returns empty when the caret sits at the start of a fresh sentence: there
+    /// is no tail yet, and matching on nothing would offer every phrase at once.
     public static func matchableTail(of text: String) -> String {
-        var tail = ""
-        for character in text.reversed() {
-            if ".!?\n".contains(character) { break }
-            tail.insert(character, at: tail.startIndex)
+        var out = ""
+        var current = ""
+        var pending = TextBoundary.none
+
+        for character in text {
+            guard let scalar = character.unicodeScalars.first else { continue }
+            if ContextReader.isWordCharacter(scalar) {
+                if pending != .none {
+                    // A sentence ended before this word: everything already
+                    // collected belongs to the previous one.
+                    if pending.endsSentence { out = "" } else { out += pending.separatorText }
+                    pending = .none
+                }
+                current.append(character)
+            } else {
+                out += current
+                current = ""
+                pending = TextBoundary.strongest(
+                    pending, TextBoundary(separator: character))
+            }
         }
-        return tail.trimmingCharacters(in: .whitespaces)
+
+        out += current
+        if pending.endsSentence { return "" }
+        if pending != .none { out += pending.separatorText }
+        return out
     }
 }

@@ -15,7 +15,16 @@ import Foundation
 /// Plus `correction` (typo pairs learned from backspaces) and `feedback`
 /// (acceptance rates, which tune the gate and feed the savings metric).
 public final class Store {
-    public static let schemaVersion = 2
+    public static let schemaVersion = 3
+
+    /// The `kind` given to sentence and paragraph markers.
+    ///
+    /// They live in `vocab` because the n-gram tables key on vocab ids, and
+    /// reusing that machinery is what lets backoff, per-app scoping and the
+    /// existing queries work on breaks with no special cases. They are not words,
+    /// though, so every surface that shows the user their own vocabulary filters
+    /// them out — see `allVocab`.
+    public static let boundaryKind = "boundary"
 
     /// Context slot meaning "any word", as opposed to 0 which means "no word".
     ///
@@ -126,6 +135,7 @@ public final class Store {
 
         try backfillNgramMarginals()
         try pruneSubPhraseSnippets()
+        try resetStatisticsForBoundaries()
 
         if database.userVersion < Store.schemaVersion {
             database.userVersion = Store.schemaVersion
@@ -136,6 +146,48 @@ public final class Store {
         if try metaValue(for: "created") == nil {
             try setMeta("created", ISO8601DateFormatter().string(from: Date()))
         }
+    }
+
+    /// Clears the tiers that were recorded under the old, punctuation-blind
+    /// tokenization — and keeps everything that was not.
+    ///
+    /// Before schema 3 every separator was discarded at the moment a word was
+    /// committed, so the statistics and the mined phrases both encode a sequence
+    /// the app no longer speaks. Two concrete failures, not one:
+    ///
+    ///   - **n-grams are keyed on the wrong context.** A bigram recorded across a
+    ///     full stop ("…the update. Please…") is stored as `(the, update) ->
+    ///     please` with nothing marking the break, and that row is still a live
+    ///     match for a mid-sentence "the update" — so it suggests a sentence
+    ///     opener in the middle of a sentence. Meanwhile the rows the new
+    ///     tokenization asks for, keyed on a sentence or paragraph marker, were
+    ///     never written.
+    ///   - **snippets have no punctuation.** They were joined with single spaces,
+    ///     so "Thanks, Anand" was stored as "Thanks Anand". `matchableTail` now
+    ///     produces canonical punctuation, which cannot match them; the ones that
+    ///     still match are the phrases mined straight across a break, like
+    ///     "you from Where".
+    ///
+    /// Neither is recoverable by rewriting: the separator that would tell us
+    /// where the breaks were is exactly what was thrown away. So these two tables
+    /// are cleared and relearned, which is cheap — every word typed feeds them,
+    /// and they rebuild within days.
+    ///
+    /// **Vocabulary, corrections and identity are kept.** Word counts, kinds and
+    /// protection are boundary-independent; typo pairs come from backspaces; and
+    /// identity facts were confirmed by hand. Those took months to accumulate and
+    /// nothing about them is wrong. Wiping the whole store to fix the statistics
+    /// would be throwing away the expensive half to repair the cheap one.
+    ///
+    /// Feedback goes too. Its acceptance rates were measured against the previous
+    /// ranking — in one real store the n-gram tier stood at 0 accepted from 57
+    /// shown — and `Calibrator` would read that as evidence about the *current*
+    /// tier and suppress it to the floor, for faults that have since been fixed.
+    private func resetStatisticsForBoundaries() throws {
+        guard database.userVersion < 3 else { return }
+        try database.execute("DELETE FROM ngram")
+        try database.execute("DELETE FROM snippet WHERE source <> 'manual'")
+        try database.execute("DELETE FROM feedback")
     }
 
     /// Builds the bigram and unigram marginals for a store written before they
@@ -277,8 +329,17 @@ public final class Store {
         try database.execute("UPDATE vocab SET kind = ? WHERE word = ?", [.text(kind), .text(word)])
     }
 
+    /// Every word the user has actually typed, most frequent first.
+    ///
+    /// Sequence markers are excluded. This is the query behind the memory review,
+    /// the export and the word count on the settings screen, and all three
+    /// promise the user their own vocabulary — a row reading "\u{1}p" is not
+    /// something anyone can review, delete or make sense of.
     public func allVocab() throws -> [VocabEntry] {
-        try database.query("SELECT word, kind, count, protected FROM vocab ORDER BY count DESC")
+        try database.query("""
+            SELECT word, kind, count, protected FROM vocab
+            WHERE kind <> '\(Store.boundaryKind)' ORDER BY count DESC
+            """)
             .map {
                 VocabEntry(word: $0.string("word") ?? "",
                            kind: $0.string("kind") ?? "word",

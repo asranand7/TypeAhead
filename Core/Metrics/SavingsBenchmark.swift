@@ -76,6 +76,9 @@ public struct SavingsBenchmark {
     public static func train(_ observers: [TypingObserver],
                              on text: String,
                              appBundleID: String? = nil) {
+        // Mirrors `Coordinator.accumulate` exactly, boundary classification
+        // included. A benchmark that fed the observers a different signal stream
+        // from the live app would be measuring something the user never runs.
         var current = ""
         for character in text {
             if let scalar = character.unicodeScalars.first,
@@ -83,9 +86,16 @@ public struct SavingsBenchmark {
                 current.append(character)
                 for observer in observers { observer.observe(.typed(String(character))) }
             } else {
-                if !current.isEmpty {
+                let boundary = TextBoundary(separator: character)
+                if current.isEmpty {
+                    if boundary.endsSentence {
+                        for observer in observers { observer.observe(.boundaryCrossed(boundary)) }
+                    }
+                } else {
                     for observer in observers {
-                        observer.observe(.wordCommitted(word: current, appBundleID: appBundleID))
+                        observer.observe(.wordCommitted(word: current,
+                                                        boundary: boundary,
+                                                        appBundleID: appBundleID))
                     }
                     current = ""
                 }
@@ -94,7 +104,9 @@ public struct SavingsBenchmark {
         }
         if !current.isEmpty {
             for observer in observers {
-                observer.observe(.wordCommitted(word: current, appBundleID: appBundleID))
+                observer.observe(.wordCommitted(word: current,
+                                                boundary: .none,
+                                                appBundleID: appBundleID))
             }
         }
     }

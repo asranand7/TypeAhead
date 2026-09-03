@@ -69,7 +69,7 @@ public final class Coordinator: NSObject, KeyTapDelegate {
     /// remembered.
     private func emit(_ signal: TypingSignal) {
         switch signal {
-        case .typed, .wordCommitted, .backspaced:
+        case .typed, .wordCommitted, .backspaced, .boundaryCrossed:
             guard !settings.isLearningPaused else { return }
         case .caretMoved, .suggestionShown, .suggestionAccepted, .suggestionRejected:
             break
@@ -316,24 +316,38 @@ public final class Coordinator: NSObject, KeyTapDelegate {
     }
 
     /// Tracks the token under construction so a completed word can be announced
-    /// exactly once, on the character that ends it.
+    /// exactly once, on the character that ends it — *with* that character's
+    /// classification, which is the part that used to be dropped on the floor.
     private func accumulate(_ characters: String) {
         for character in characters {
             if let scalar = character.unicodeScalars.first,
                ContextReader.isWordCharacter(scalar) {
                 partialWord.append(character)
             } else {
-                commitPartialWord()
+                let boundary = TextBoundary(separator: character)
+                if partialWord.isEmpty {
+                    // Nothing to close, but the break itself is still news: the
+                    // word before it was ended by a weaker separator, as in
+                    // "Hi John,\n\n", and without this the paragraph is lost.
+                    if boundary.endsSentence { emit(.boundaryCrossed(boundary)) }
+                } else {
+                    commitPartialWord(endedBy: boundary)
+                }
             }
         }
     }
 
-    private func commitPartialWord() {
+    /// - Parameter boundary: what ended the word. Defaults to `.none`, which is
+    ///   the honest answer for a flush caused by a caret move or a focus change:
+    ///   the word is over, but nothing was typed to end it, so what follows is
+    ///   unknown and no phrase may be built across the gap.
+    private func commitPartialWord(endedBy boundary: TextBoundary = .none) {
         guard !partialWord.isEmpty else { return }
         let word = partialWord
         partialWord = ""
         emit(.wordCommitted(
             word: word,
+            boundary: boundary,
             appBundleID: NSWorkspace.shared.frontmostApplication?.bundleIdentifier))
     }
 
@@ -355,8 +369,14 @@ public final class Coordinator: NSObject, KeyTapDelegate {
     /// app answers, and a slow app must never stall the keystroke path.
     private func predict() {
         let generation = keystrokeGeneration
+        // Checked *before* the read, not after it. A blocked app is meant to be
+        // invisible to the whole pipeline, and reading the context is no longer
+        // free of consequence: it now walks the window's accessibility tree for
+        // ambient fields. Doing that and then discarding the result would mean
+        // the blocklist stopped the suggestion but not the looking.
+        guard !settings.isBlocked(
+            NSWorkspace.shared.frontmostApplication?.bundleIdentifier) else { return }
         let context = contextReader.read()
-        guard !settings.isBlocked(context.appBundleID) else { return }
         let candidate = engine.bestCandidate(for: context)
 
         DispatchQueue.main.async { [weak self] in

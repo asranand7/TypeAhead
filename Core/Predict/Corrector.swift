@@ -35,7 +35,7 @@ public final class Corrector: SuggestionSource, TypingObserver {
 
     public func observe(_ signal: TypingSignal) {
         switch signal {
-        case .wordCommitted(let word, _):
+        case .wordCommitted(let word, _, _):
             handleCommit(word)
 
         case .backspaced:
@@ -52,6 +52,11 @@ public final class Corrector: SuggestionSource, TypingObserver {
             deletedWord = nil
             backspaceRun = 0
             lock.unlock()
+
+        case .boundaryCrossed:
+            // A sentence ended without closing a word, so nothing was deleted and
+            // nothing was retyped. Correction pairs are unaffected.
+            break
 
         case .suggestionShown, .suggestionAccepted, .suggestionRejected:
             break

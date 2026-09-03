@@ -26,6 +26,16 @@ public final class ContextReader {
     private var shadow = ""
     private let systemWide = AXUIElementCreateSystemWide()
 
+    /// Labelled fields around the caret, and when they were last read.
+    ///
+    /// Cached because this is a tree walk, not a single attribute fetch, and it
+    /// must never run on the keystroke path at full cost. A subject line does not
+    /// change while you type the body, so re-reading it per keystroke would buy
+    /// nothing for several milliseconds of Accessibility round trips.
+    private var ambient: [TypingContext.AmbientField] = []
+    private var ambientReadAt: Date?
+    private let ambientLock = NSLock()
+
     public init() {
         AXUIElementSetMessagingTimeout(systemWide, ContextReader.messagingTimeout)
     }
@@ -48,6 +58,11 @@ public final class ContextReader {
     /// those, and stale context is worse than no context.
     public func invalidateShadow() {
         shadow = ""
+        // The window around the caret may be a different one entirely now.
+        ambientLock.lock()
+        ambient = []
+        ambientReadAt = nil
+        ambientLock.unlock()
     }
 
     // MARK: - Reading
@@ -61,7 +76,8 @@ public final class ContextReader {
                 currentWordPrefix: ContextReader.trailingWord(of: split.before),
                 appBundleID: bundleID,
                 isAuthoritative: true,
-                textAfterCaret: split.after
+                textAfterCaret: split.after,
+                ambientContext: ambientFields()
             )
         }
 
@@ -73,6 +89,147 @@ public final class ContextReader {
             appBundleID: bundleID,
             isAuthoritative: false
         )
+    }
+
+    // MARK: - Ambient context
+
+    /// How long a set of ambient fields is reused before being re-read.
+    ///
+    /// Focus changes clear the cache outright, so this only bounds the case where
+    /// the user stays in one field while the window around it changes — a new
+    /// message arriving in a thread, say. Long enough to cost nothing, short
+    /// enough that stale context does not survive a conversation.
+    private static let ambientLifetime: TimeInterval = 20
+
+    /// The most fields worth carrying. A window can expose dozens of labelled
+    /// strings and almost all of them are chrome; the useful ones — subject,
+    /// recipient, channel — are few and near the top.
+    private static let maxAmbientFields = 4
+
+    /// How much of one field to keep.
+    private static let maxAmbientValueChars = 120
+
+    /// Nodes visited before giving up. A hard cap rather than a time budget,
+    /// because the cost here is Accessibility round trips and the count is what
+    /// actually bounds them.
+    private static let maxAmbientNodes = 60
+
+    private func ambientFields() -> [TypingContext.AmbientField] {
+        ambientLock.lock()
+        let cached = ambient
+        let fresh = ambientReadAt.map {
+            Date().timeIntervalSince($0) < ContextReader.ambientLifetime
+        } ?? false
+        ambientLock.unlock()
+        if fresh { return cached }
+
+        let found = readAmbientFields()
+        ambientLock.lock()
+        ambient = found
+        ambientReadAt = Date()
+        ambientLock.unlock()
+        return found
+    }
+
+    /// Walks up from the caret to the window and collects labelled text.
+    ///
+    /// Deliberately shallow and deliberately capped. A full traversal of a mail
+    /// window is thousands of nodes and every one is a blocking cross-process
+    /// call; what is wanted is the handful of labelled fields a compose window
+    /// puts near the top, which are within a few levels of the text area.
+    private func readAmbientFields() -> [TypingContext.AmbientField] {
+        guard let focused = focusedElement() else { return [] }
+
+        // Up to the enclosing window, or as far as the chain goes.
+        var root = focused
+        for _ in 0..<6 {
+            guard let parent = element(root, attribute: kAXParentAttribute) else { break }
+            AXUIElementSetMessagingTimeout(parent, ContextReader.messagingTimeout)
+            root = parent
+            if string(parent, attribute: kAXRoleAttribute) == kAXWindowRole as String { break }
+        }
+        guard root != focused else { return [] }
+
+        var found: [TypingContext.AmbientField] = []
+        var seen = Set<String>()
+        var budget = ContextReader.maxAmbientNodes
+        var queue: [(AXUIElement, Int)] = [(root, 0)]
+
+        while !queue.isEmpty, budget > 0, found.count < ContextReader.maxAmbientFields {
+            let (node, depth) = queue.removeFirst()
+            budget -= 1
+            if depth > 4 { continue }
+
+            // The field being typed into is already the main context; including it
+            // again would just duplicate the prompt.
+            if node != focused, let field = ambientField(of: node),
+               !seen.contains(field.label) {
+                seen.insert(field.label)
+                found.append(field)
+            }
+
+            guard let children = elements(node, attribute: kAXChildrenAttribute) else { continue }
+            for child in children.prefix(20) {
+                AXUIElementSetMessagingTimeout(child, ContextReader.messagingTimeout)
+                queue.append((child, depth + 1))
+            }
+        }
+        return found
+    }
+
+    /// A node's contribution, if it has one.
+    ///
+    /// Requires both a label and a value: an unlabelled string is chrome as often
+    /// as it is content, and without a name there is no way to tell the model what
+    /// it is looking at. "Subject: Q3 audit" is worth a prompt line; a bare
+    /// "Q3 audit" from an unidentified node is not.
+    private func ambientField(of node: AXUIElement) -> TypingContext.AmbientField? {
+        guard let role = string(node, attribute: kAXRoleAttribute) else { return nil }
+        let textual = [kAXTextFieldRole, kAXStaticTextRole, kAXTextAreaRole]
+            .map { $0 as String }
+        guard textual.contains(role) else { return nil }
+
+        guard let label = [kAXTitleAttribute, kAXDescriptionAttribute,
+                           kAXPlaceholderValueAttribute]
+            .lazy
+            .compactMap({ self.string(node, attribute: $0) })
+            .first(where: { !$0.trimmingCharacters(in: .whitespaces).isEmpty })
+        else { return nil }
+
+        guard let raw = string(node, attribute: kAXValueAttribute) else { return nil }
+        let value = raw
+            .replacingOccurrences(of: "\n", with: " ")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !value.isEmpty else { return nil }
+
+        return TypingContext.AmbientField(
+            label: label.trimmingCharacters(in: .whitespaces),
+            value: String(value.prefix(ContextReader.maxAmbientValueChars)))
+    }
+
+    private func string(_ element: AXUIElement, attribute: String) -> String? {
+        var value: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(
+                element, attribute as CFString, &value) == .success else { return nil }
+        return value as? String
+    }
+
+    private func element(_ element: AXUIElement, attribute: String) -> AXUIElement? {
+        var value: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(
+                element, attribute as CFString, &value) == .success,
+              let raw = value, CFGetTypeID(raw) == AXUIElementGetTypeID() else { return nil }
+        return (raw as! AXUIElement)
+    }
+
+    private func elements(_ element: AXUIElement, attribute: String) -> [AXUIElement]? {
+        var value: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(
+                element, attribute as CFString, &value) == .success,
+              let array = value as? [AnyObject] else { return nil }
+        return array.compactMap { item in
+            CFGetTypeID(item) == AXUIElementGetTypeID() ? (item as! AXUIElement) : nil
+        }
     }
 
     private func focusedElement() -> AXUIElement? {

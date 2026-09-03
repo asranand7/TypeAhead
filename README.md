@@ -73,15 +73,28 @@ with `find-certificate` instead.
 
 Then grant Accessibility once, in System Settings › Privacy & Security.
 
-### Optional: a model
+### The model
 
 ```bash
 brew install llama.cpp
 ```
 
-Then pick one from the menu bar. Entirely optional — the half that learns *your*
-writing needs no model at all, and is the stronger half for anything you type
-often.
+Qwen3-0.6B is on by default and fetched in the background on first launch; until
+it arrives the app runs on memory alone. Pick a different one, or none, from the
+menu bar.
+
+Not optional the way it used to be. For most of this project's life the default
+was "No model (memory only)", which meant the shipping app had no language model
+in it at all — every suggestion came from n-gram counts, a prefix trie and the
+system spell checker. It also meant the model tier was never exercised: it was
+configured to generate 8 tokens behind a 300ms timeout, which measures at 72ms
+against a 40ms debounce, three times over budget and invisible because nobody
+had it switched on.
+
+One token, with the KV cache warm, measures at **13.6ms median / 20.6ms p90** on
+an M5 — and Qwen3's tokenizer is close to word-level for common English, so one
+token is usually a whole word. That is what makes the model affordable per
+keystroke, and affordable per keystroke is what makes it worth defaulting on.
 
 ### Tests
 
@@ -89,7 +102,21 @@ often.
 swift run TypeAheadTests
 ```
 
-423 assertions. A plain executable, not XCTest, which ships only with Xcode.
+496 assertions. A plain executable, not XCTest, which ships only with Xcode.
+
+The suite reports three numbers, all on **held-out** writing — `Corpus.train` and
+`Corpus.test` are different messages in the same voice:
+
+```
+→ 31.5% saved (118 of 375 keystrokes)
+→ ExactMatch@1 92.6% at 39.8% coverage
+→ log-perplexity 6.912 with boundaries, 7.960 without
+```
+
+The savings figure used to read 75% and was measured by replaying the training
+text itself, in a corpus of one lowercase line with no punctuation. Coverage is
+reported alongside precision because the two trade against each other and neither
+means anything alone.
 
 ## Architecture
 
@@ -99,7 +126,7 @@ KeyTap ──▶ Coordinator ──▶ ContextReader ──▶ SuggestionEngine 
               │                                     │  register()
               ├──▶ AcceptanceController      [ SuggestionSource ]
               │      (the only path to text)   identity · corrections · snippets
-              │                                 personal n-gram · GGUF model
+              │                                 Fusion (n-gram ⊕ model) · lexicon
               ├──▶ Inserter    (the only writer)
               ├──▶ SuggestionOverlay
               └──▶ TypingSignalBus ──▶ [ TypingObserver ]
@@ -110,6 +137,59 @@ KeyTap ──▶ Coordinator ──▶ ContextReader ──▶ SuggestionEngine 
 Two extension points carry every feature. Adding one of the seven phases meant
 registering a `SuggestionSource` or a `TypingObserver` — `Coordinator` and
 `SuggestionEngine` never changed after phase 1.
+
+### Fusion: one distribution, not five arguing
+
+Personal memory and the language model answer the same question — what word comes
+next — so they are interpolated rather than pooled and ranked against each other:
+
+```
+P(word) = α · P_personal(word) + (1 − α) · P_global(word)      α = 0.4
+```
+
+This is the scheme Gmail Smart Compose shipped for the same problem (Chen et al.,
+KDD 2019), including the weight. Before it, every tier invented a confidence on
+its own scale — a conditional language-model probability, a hand-tuned rank prior,
+`0.35 + 0.06n` for snippets — and the ranker compared those numbers directly as
+though they were commensurable. `Calibrator` exists because they are not, and it
+was treating a category error as a scaling problem.
+
+The union of both vocabularies, not the intersection, is the point. A name only
+memory has seen keeps `α` times its probability and can still win; a word only
+the model knows carries the sentence where memory has nothing to say; a word both
+propose gets both terms and beats either alone.
+
+Measured on held-out writing with Qwen3-0.6B attached:
+
+| | memory only | fused |
+|---|---|---|
+| log-perplexity | 5.141 | **4.051** |
+| coverage | 52.7% | **59.2%** |
+| keystrokes saved | 43.9% | **47.8%** |
+| ExactMatch@1 | 92.5% | 83.5% |
+| latency (p90) | — | **20.5ms** |
+
+Precision falls because coverage rises: the fused model answers in cases where
+memory alone declined. Perplexity is the number that says the prediction itself
+got better rather than a threshold having moved.
+
+Rule 2 still holds — with no model attached this is exactly the personal model's
+own output, unchanged.
+
+### Sentence and paragraph structure
+
+Every separator used to be discarded at the moment a word was committed, so a
+space, a comma, a full stop and a Return were one event: "word over". Nothing
+downstream could tell a clause break from a sentence end. The consequences were
+visible from the outside — suggestions welded to punctuation ("Hi John," +
+"thanks " = "Hi John,thanks"), lowercase words at the start of lines, phrases
+mined straight through paragraph breaks, and a comma silently switching the
+snippet tier off because stored phrases had no punctuation to match against.
+
+`TypingSignal.wordCommitted` now carries a `TextBoundary`, and sentence and
+paragraph breaks enter the n-gram as their own tokens, so the model learns what
+starts your sentences the same way it learns anything else. Worth 6.912 against
+7.960 log-perplexity on held-out text.
 
 ### The objective function
 
@@ -134,11 +214,13 @@ Without that cap, expected savings scaled with raw character count and long
 suggestions won by construction. They did: in a real store the snippet tier was
 the most-shown source and had never once been accepted.
 
-**Confidence is calibrated against acceptance.** Each source invents its own
-probability on its own scale, so every origin is rescaled by how often it is
-actually taken, relative to the average origin — a redistribution, never an
-across-the-board cut, because the savings gate is absolute and deflating
-everything would silence the app.
+**Confidence is calibrated against acceptance.** The tiers that remain separate —
+snippets, identity, corrections, the lexicon — still invent their own probability
+on their own scale, so every origin is rescaled by how often it is actually taken,
+relative to the average origin. A redistribution, never an across-the-board cut,
+because the savings gate is absolute and deflating everything would silence the
+app. It no longer has to referee between the n-gram and the model; those are
+interpolated instead.
 
 ### The memory, in four tiers
 
@@ -147,7 +229,7 @@ everything would silence the app.
 | Identity | emails, phone | seeded from your contact card, or after 3 sightings |
 | People & terms | names, jargon, projects | automatically |
 | Snippets | phrases of 3+ words you repeat | mined after 2 repeats |
-| Statistics | n-grams, per-app | every word |
+| Statistics | n-grams, per-app, with sentence and paragraph markers | every word |
 
 Plus typo pairs learned from your own backspaces, and acceptance feedback.
 
@@ -176,11 +258,19 @@ machine, with a switch to drop the identity tier.
 
 ## Verified
 
-423 assertions, `swift run TypeAheadTests`:
+496 assertions, `swift run TypeAheadTests`:
 
-- **74.4% keystrokes saved** on the test corpus — an upper bound, since that
-  corpus deliberately repeats itself and the simulated typist accepts every
-  correct suggestion. Real writing will be lower.
+- **31.5% keystrokes saved on held-out writing** — still an upper bound, since
+  the simulated typist accepts every correct suggestion, but measured on messages
+  the model was not trained on. The 74.4% this used to claim was replay of the
+  training text.
+- **ExactMatch@1 92.6% at 39.8% coverage**, reported together because precision
+  and coverage trade against each other
+- **log-perplexity 6.912 with sentence boundaries against 7.960 without** — the
+  measurement that says the punctuation work improved the prediction rather than
+  merely not breaking it
+- **fusion arithmetic**: the union of both vocabularies, agreement beating either
+  side alone, and an empty model side leaving personal memory untouched
 - ranking order, savings gate, tie-breaking, determinism
 - the Tab state machine, **Tab passthrough when nothing is pending**, and that
   *no other key accepts*
@@ -194,6 +284,13 @@ machine, with a switch to drop the identity tier.
 - rule 2: export on model A imports on model B; deleting the model leaves a
   working app; hot-swapping leaves memory byte-identical
 - rules 1 and 2 asserted over the source tree
+- **separators classified rather than discarded**, runs collapsing to their
+  strongest member, and carriage return treated as a paragraph break
+- **learning and prediction agree token for token** on the sequence, so a trigram
+  recorded is a trigram that can be looked up
+- suggestions never welded to punctuation; sentence-initial words capitalised
+- phrases never mined across a sentence or paragraph break, and a phrase typed
+  with a comma still matched after one
 
 ### Not yet verified — the app matrix
 
@@ -210,8 +307,18 @@ less reliably. This needs a human at a keyboard.
 | VS Code | | | | |
 | Terminal | | | | |
 
-Latency against a real model is also unmeasured — no model is installed, and the
-`ModelComparison` harness exists to measure it once one is.
+Latency against a real model *is* now measured, on an M5 with Qwen3-0.6B Q8_0:
+
+| | |
+|---|---|
+| cold, no prompt cache | 183ms |
+| warm, `n_predict=8` (the old setting) | 72ms |
+| warm, `n_predict=1` | **13.6ms median / 20.6ms p90** |
+| full fused path, end to end | **19.5ms median / 20.5ms p90** |
+
+What is still unmeasured is how this behaves across the app matrix above, and how
+the ambient-context read fares in apps whose accessibility trees are unusual —
+both need a human at a keyboard.
 
 ## Menu bar
 
@@ -219,6 +326,7 @@ Latency against a real model is also unmeasured — no model is installed, and t
 - **Start at login** — on by default
 - Keystrokes saved, total and this session
 - **Model** — catalog, download, hot-swap, "Add model…" for any local GGUF
+  (Qwen3-0.6B by default, fetched in the background on first launch)
 - **Memory** — review what it knows, export, import, pause learning
 - **This app** — never suggest in the app you are currently in
 

@@ -65,9 +65,9 @@ func runPortabilityTests(_ s: Suite) {
         let sourceModel = PersonalModel(store: source)
         for _ in 0..<4 {
             sourceModel.observe(.caretMoved)
-            sourceModel.observe(.wordCommitted(word: "please", appBundleID: nil))
-            sourceModel.observe(.wordCommitted(word: "find", appBundleID: nil))
-            sourceModel.observe(.wordCommitted(word: "attached", appBundleID: nil))
+            sourceModel.observe(.wordCommitted(word: "please", boundary: .space, appBundleID: nil))
+            sourceModel.observe(.wordCommitted(word: "find", boundary: .space, appBundleID: nil))
+            sourceModel.observe(.wordCommitted(word: "attached", boundary: .space, appBundleID: nil))
         }
 
         // Give the destination a different vocabulary first, so ids cannot line up.

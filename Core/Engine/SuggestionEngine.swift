@@ -136,7 +136,12 @@ public final class SuggestionEngine {
             return Candidate(text: candidate.text,
                              probability: boosted,
                              origin: candidate.origin,
-                             replacesPreviousCharacters: candidate.replacesPreviousCharacters)
+                             replacesPreviousCharacters: candidate.replacesPreviousCharacters,
+                             // Carried explicitly. Omitting it fell back to the
+                             // origin's default, so a candidate whose granularity
+                             // had been set deliberately lost it on the way
+                             // through agreement — changing how many Tabs it takes.
+                             granularity: candidate.granularity)
         }
     }
 

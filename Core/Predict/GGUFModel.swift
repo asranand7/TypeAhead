@@ -35,7 +35,32 @@ public final class GGUFModel: SuggestionSource {
     /// Tokens to ask for. A next-word suggestion needs very few, and each one is
     /// latency the user feels while typing. Measured on Qwen3-0.6B-Q8_0: about
     /// 8ms per token, so eight tokens lands near 65ms.
-    private static let tokensToPredict = 8
+    /// Tokens generated per keystroke.
+    ///
+    /// One, and the number is measured rather than chosen. On an M5 with the
+    /// prompt cache warm, a single token comes back in 13.6ms median / 20.6ms
+    /// p90 against a 40ms debounce; two costs 27ms median and 41ms p90, and
+    /// three costs 38ms / 53ms — past the budget, at which point the Coordinator
+    /// drops the result as stale and the work was wasted.
+    ///
+    /// It was 8, which measured at 72ms and was hidden by a 300ms timeout: the
+    /// model tier was three times over budget for as long as it existed, and
+    /// since it was also off by default nobody ever saw it miss.
+    ///
+    /// One token is enough because Qwen3's tokenizer is close to word-level for
+    /// common English — across a sample of realistic prefixes the first token was
+    /// a complete word 8 times out of 8. Multi-word value comes from the snippet
+    /// tier, which recalls phrases verbatim and costs nothing to generate.
+    private static let tokensToPredict = 1
+
+    /// How many alternatives to ask for alongside the chosen token.
+    ///
+    /// This is what turns the model from a source of one guess into a
+    /// distribution, which is what `Fusion` needs: interpolating a personal
+    /// n-gram against a global model requires the model's probability for *the
+    /// n-gram's* candidates, not just for its own favourite. Free — the
+    /// probabilities are already computed to sample the token at all.
+    static let alternativesToRequest = 10
 
     /// Hard ceiling on a single request.
     ///
@@ -43,7 +68,12 @@ public final class GGUFModel: SuggestionSource {
     /// prompt processing. The previous 120ms ceiling was under the real cost, so
     /// every model suggestion was abandoned in flight — the model appeared to work
     /// and never produced a single visible result.
-    private static let requestTimeout: TimeInterval = 0.30
+    /// Measured p90 is 20.6ms, so this is a stall detector, not a budget.
+    ///
+    /// Was 300ms, which is long enough to hold the prediction queue through four
+    /// more keystrokes and guarantee the answer is discarded as stale when it
+    /// finally lands. Failing fast and showing nothing is the better trade.
+    private static let requestTimeout: TimeInterval = 0.08
 
     private let port: Int
     private var process: Process?
@@ -223,22 +253,34 @@ public final class GGUFModel: SuggestionSource {
         // knows the word is "consider", not "considering".
         let partial = context.currentWordPrefix
 
-        // Trailing whitespace has to go. BPE tokenizers attach a leading space to
-        // the *following* token, so a prompt ending in a space leaves the model
-        // between tokens and the output degenerates — "Please find attached the "
-        // returns "2023-202" where "Please find attached the" returns " data set".
-        // The caller then re-adds the separator, because the suggestion still has
-        // to start with one.
-        var prompt = context.textBeforeCaret
-        if !partial.isEmpty {
-            // Drop the half-typed word so the model is asked a question it can
-            // answer: "what word comes next", not "finish this token".
-            prompt = String(prompt.dropLast(partial.count))
-        }
-        prompt = prompt.replacingOccurrences(
-            of: "\\s+$", with: "", options: .regularExpression)
-        guard !prompt.isEmpty else { return [] }
+        guard let prompt = GGUFModel.prompt(for: context) else { return [] }
 
+        guard let answer = complete(prompt: prompt) else { return [] }
+        let completion = answer.content
+
+        if !partial.isEmpty {
+            return GGUFModel.wordCompletion(from: completion, matching: partial)
+        }
+        return GGUFModel.candidates(from: completion, context: context)
+    }
+
+    /// The model's answer for one prompt: the text it chose, and the alternatives
+    /// it considered.
+    ///
+    /// One round trip serves both jobs. `suggest` wants the chosen token;
+    /// `Fusion` wants the whole distribution so it can look up what the model
+    /// thought of a word the *n-gram* proposed. Asking twice would double the
+    /// latency for a number that was already computed.
+    struct Answer {
+        let content: String
+        /// Next-token probabilities, keyed by the token's text with its leading
+        /// space stripped and case folded — the form personal memory stores words
+        /// in, so the two can be compared without either side knowing about the
+        /// other's tokenizer.
+        let distribution: [String: Double]
+    }
+
+    func complete(prompt: String) -> Answer? {
         // Raw continuation, not a chat template. The model is being used as a
         // language model, not an assistant: it should continue the sentence, not
         // answer it.
@@ -246,12 +288,16 @@ public final class GGUFModel: SuggestionSource {
             "prompt": prompt,
             "n_predict": GGUFModel.tokensToPredict,
             "temperature": 0.0,
+            // Reuses the KV cache across keystrokes, so a prompt that grew by one
+            // word costs one token of prefill rather than two hundred. Measured:
+            // 183ms cold against 13.6ms warm. Without it nothing here fits.
             "cache_prompt": true,
+            "n_probs": GGUFModel.alternativesToRequest,
             "stop": ["\n", ".", "!", "?"]
         ]
 
         guard let url = URL(string: "http://127.0.0.1:\(port)/completion"),
-              let payload = try? JSONSerialization.data(withJSONObject: body) else { return [] }
+              let payload = try? JSONSerialization.data(withJSONObject: body) else { return nil }
 
         var request = URLRequest(url: url)
         request.httpMethod = "POST"
@@ -259,22 +305,103 @@ public final class GGUFModel: SuggestionSource {
         request.httpBody = payload
         request.timeoutInterval = GGUFModel.requestTimeout
 
-        var completion: String?
+        var answer: Answer?
         let semaphore = DispatchSemaphore(value: 0)
         session.dataTask(with: request) { data, _, _ in
             defer { semaphore.signal() }
             guard let data,
-                  let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
-            else { return }
-            completion = object["content"] as? String
+                  let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                  let content = object["content"] as? String else { return }
+            answer = Answer(content: content,
+                            distribution: GGUFModel.distribution(from: object))
         }.resume()
         _ = semaphore.wait(timeout: .now() + GGUFModel.requestTimeout + 0.05)
+        return answer
+    }
 
-        guard let completion else { return [] }
-        if !partial.isEmpty {
-            return GGUFModel.wordCompletion(from: completion, matching: partial)
+    /// Pulls the next-token distribution out of a llama.cpp completion response.
+    ///
+    /// Only the *first* generated position is read. Later positions are
+    /// conditioned on tokens the user has not accepted and may never see, so
+    /// their probabilities do not describe any decision being made now.
+    ///
+    /// Tokens are folded to the form personal memory uses — leading space
+    /// stripped, lower-cased — and probabilities for tokens that fold together
+    /// are summed, because "The" and "the" are one word as far as the ranking is
+    /// concerned even though the tokenizer keeps them apart.
+    static func distribution(from object: [String: Any]) -> [String: Double] {
+        let positions = object["completion_probabilities"] as? [[String: Any]]
+        guard let first = positions?.first else { return [:] }
+
+        // llama.cpp has spelled this three ways across versions, and the current
+        // one reports log probabilities rather than probabilities. Reading only
+        // the shape that happened to be current when this was written is how a
+        // fusion silently degrades to memory-only after a `brew upgrade` — which
+        // is exactly what it did: the distribution parsed empty, `Fusion` took
+        // its no-model fallback, and every measurement came out identical to the
+        // unfused baseline with no error anywhere.
+        let entries = (first["top_logprobs"] as? [[String: Any]])
+            ?? (first["probs"] as? [[String: Any]])
+            ?? (first["top_probs"] as? [[String: Any]])
+            ?? []
+
+        var out: [String: Double] = [:]
+        for entry in entries {
+            guard let raw = (entry["token"] as? String) ?? (entry["tok_str"] as? String)
+            else { continue }
+
+            let probability: Double
+            if let p = (entry["prob"] as? Double) ?? (entry["p"] as? Double) {
+                probability = p
+            } else if let logprob = entry["logprob"] as? Double {
+                probability = exp(logprob)
+            } else {
+                continue
+            }
+            guard probability > 0 else { continue }
+
+            // A token with no leading space continues the word already being
+            // generated rather than starting the next one. Only word-initial
+            // tokens answer "what comes next", which is the question being asked.
+            guard raw.hasPrefix(" ") else { continue }
+
+            let word = PersonalModel.normalize(raw)
+            // A token that folds to nothing is punctuation or whitespace: real
+            // signal about what comes next, but not a word anyone can be offered.
+            guard !word.isEmpty, word.allSatisfy({ $0.isLetter || $0 == "'" }) else { continue }
+            out[word, default: 0] += probability
         }
-        return GGUFModel.candidates(from: completion, context: context)
+        return out
+    }
+
+    /// The prompt for a context: the surrounding fields, then everything before
+    /// the caret, with a half-typed word removed and trailing whitespace trimmed.
+    ///
+    /// Shared with `Fusion` so both ask the model the same question. A prompt
+    /// that ends in a space leaves a BPE tokenizer between tokens and the output
+    /// degenerates — "Please find attached the " returns "2023-202" where the
+    /// same text without the space returns " data set".
+    ///
+    /// Ambient fields are prepended as plain labelled lines rather than encoded
+    /// some cleverer way, because a base language model reads them as what they
+    /// are: a header above a message. It is the achievable version of what Smart
+    /// Compose did with averaged field embeddings, and it costs only prefill —
+    /// which the KV cache pays once and then reuses for the rest of the message.
+    public static func prompt(for context: TypingContext) -> String? {
+        var prompt = context.textBeforeCaret
+        let partial = context.currentWordPrefix
+        if !partial.isEmpty { prompt = String(prompt.dropLast(partial.count)) }
+        prompt = prompt.replacingOccurrences(
+            of: "\\s+$", with: "", options: .regularExpression)
+        guard !prompt.isEmpty else { return nil }
+
+        guard !context.ambientContext.isEmpty else { return prompt }
+        // The header goes first and stays byte-identical while the user types, so
+        // it sits at the front of the cached prefix and is prefilled once.
+        let header = context.ambientContext
+            .map { "\($0.label): \($0.value)" }
+            .joined(separator: "\n")
+        return header + "\n\n" + prompt
     }
 
     /// Keeps the model's answer only if it actually continues the word the user

@@ -28,16 +28,44 @@ public struct TypingContext: Sendable, Equatable {
     /// shadow keystroke buffer. Callers use it to decide how much to trust the text.
     public let isAuthoritative: Bool
 
+    /// Labelled text from the window around the caret — a subject line, a
+    /// recipient, a channel name — in the order the window presents it.
+    ///
+    /// The single largest source of context the app was ignoring. Everything
+    /// above conditions on the field being typed into and nothing else, so
+    /// writing a legal notice and messaging a friend look identical to the
+    /// predictor if the last two words match. Smart Compose's central finding
+    /// was that conditioning on the subject line and the previous message beat
+    /// making the model bigger, and it is free here: these fields are sitting in
+    /// the same accessibility tree the caret was read from.
+    ///
+    /// Read once per focus change rather than per keystroke, and never stored.
+    /// It reaches the local model's prompt and nothing else — not the database,
+    /// not an export, not disk.
+    public let ambientContext: [AmbientField]
+
+    /// One labelled piece of surrounding text.
+    public struct AmbientField: Sendable, Equatable {
+        public let label: String
+        public let value: String
+        public init(label: String, value: String) {
+            self.label = label
+            self.value = value
+        }
+    }
+
     public init(textBeforeCaret: String,
                 currentWordPrefix: String,
                 appBundleID: String?,
                 isAuthoritative: Bool,
-                textAfterCaret: String = "") {
+                textAfterCaret: String = "",
+                ambientContext: [AmbientField] = []) {
         self.textBeforeCaret = textBeforeCaret
         self.currentWordPrefix = currentWordPrefix
         self.appBundleID = appBundleID
         self.isAuthoritative = isAuthoritative
         self.textAfterCaret = textAfterCaret
+        self.ambientContext = ambientContext
     }
 }
 

@@ -14,6 +14,7 @@ public final class TypeAheadApp: NSObject, NSApplicationDelegate {
     private var store: Store!
     private var calibrator: Calibrator!
     private var personal: PersonalModel!
+    private var fusion: Fusion!
     private var snippetMiner: SnippetMiner!
     private var snippetSource: SnippetSource!
     private var identityDetector: IdentityDetector!
@@ -91,6 +92,12 @@ public final class TypeAheadApp: NSObject, NSApplicationDelegate {
         registry = ModelRegistry(engine: engine) { [weak self] in
             self?.rebuildSources()
         }
+
+        // The model is read through the registry on every call rather than
+        // captured, so a hot swap takes effect on the next keystroke and a
+        // stopped model is never held alive by this reference. Rule 2: the model
+        // is a commodity, and nothing here outlives one.
+        fusion = Fusion(personal: personal) { [weak self] in self?.registry.active }
     }
 
     /// Rebuilt wholesale on every model swap. Cheap, and it keeps registration
@@ -100,14 +107,16 @@ public final class TypeAheadApp: NSObject, NSApplicationDelegate {
         engine.register(identitySource)   // longest, most certain wins
         engine.register(corrector)
         engine.register(snippetSource)
-        engine.register(personal)
+        // One source, not two. Personal memory and the language model answer the
+        // same question — what word comes next — so they are interpolated into a
+        // single distribution rather than pooled and sorted against each other on
+        // scales that were never comparable. With no model attached this is
+        // exactly the personal model's own output.
+        engine.register(fusion)
         // General English, so the app is useful before it has learned anything.
         // Registered last of the personal sources and scored lower, so it fades
         // behind personal memory rather than competing with it.
         engine.register(lexicon)
-        if let model = registry.active {
-            engine.register(model)
-        }
     }
 
     private func buildCoordinator() {
