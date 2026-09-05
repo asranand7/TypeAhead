@@ -277,3 +277,50 @@ func runForgetTests(_ s: Suite) {
                  "a phrase merely containing the letters is kept")
     }
 }
+
+func runPruneTests(_ s: Suite) {
+    s.report("Pruning unrepeated phrases")
+
+    s.test("a phrase seen once and left alone is eventually discarded") {
+        let (store, _) = try makeTemporaryStore()
+        try store.recordSnippet("typed once and never again", source: "auto")
+        try store.recordSnippet("let me know if that works", source: "auto")
+        try store.recordSnippet("let me know if that works", source: "auto")  // repeated
+        try store.recordSnippet("my own phrase", source: "manual")
+
+        let later = Date().addingTimeInterval(Store.unrepeatedSnippetLifetime + 60)
+        let removed = try store.pruneUnrepeatedSnippets(now: later)
+
+        let remaining = try store.allSnippets().map(\.text)
+        s.expectEqual(removed, 1, "exactly the one-sighting phrase went")
+        s.expect(!remaining.contains("typed once and never again"), "candidate discarded")
+        s.expect(remaining.contains("let me know if that works"),
+                 "a phrase that repeated is a habit, kept whatever its age")
+        s.expect(remaining.contains("my own phrase"),
+                 "a phrase added by hand is not the miner's to discard")
+    }
+
+    s.test("a fresh candidate survives the sweep") {
+        // The whole point of recording every length is fast discovery. A sweep
+        // that took this afternoon's candidates would defeat it.
+        let (store, _) = try makeTemporaryStore()
+        try store.recordSnippet("mined a moment ago", source: "auto")
+        s.expectEqual(try store.pruneUnrepeatedSnippets(), 0, "nothing removed")
+        s.expect(try store.allSnippets().map(\.text).contains("mined a moment ago"), "kept")
+    }
+
+    s.test("the ceiling bounds a heavy writing day") {
+        let (store, _) = try makeTemporaryStore()
+        for index in 0..<40 { try store.recordSnippet("candidate number \(index)", source: "auto") }
+        try store.recordSnippet("kept because it repeated", source: "auto")
+        try store.recordSnippet("kept because it repeated", source: "auto")
+
+        let removed = try store.pruneUnrepeatedSnippets(keepingAtMost: 10)
+        s.expectEqual(removed, 30, "trimmed to the ceiling")
+
+        let remaining = try store.allSnippets()
+        s.expectEqual(remaining.filter { $0.count == 1 }.count, 10, "ceiling honoured")
+        s.expect(remaining.contains { $0.text == "kept because it repeated" },
+                 "repeated phrases are never counted against the ceiling")
+    }
+}

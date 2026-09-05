@@ -48,6 +48,16 @@ public final class TypeAheadApp: NSObject, NSApplicationDelegate {
         registry.restoreActive()
         rebuildSources()
 
+        // Sweep away mining candidates that never repeated. On launch rather than
+        // on a timer: it is a bulk delete, it must not land in the middle of the
+        // keystroke path, and a store only degrades over days.
+        DispatchQueue.global(qos: .utility).async { [weak self] in
+            guard let store = self?.store else { return }
+            if let removed = try? store.pruneUnrepeatedSnippets(), removed > 0 {
+                NSLog("TypeAhead: pruned \(removed) phrases that were seen once and never again")
+            }
+        }
+
         // On by default, in the background: a typing aid you have to launch is one
         // you stop using.
         LaunchAtLogin.configureOnFirstRun()

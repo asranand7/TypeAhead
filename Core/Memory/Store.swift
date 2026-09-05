@@ -528,6 +528,68 @@ public final class Store {
             }
     }
 
+    /// How long a phrase seen once is kept as a candidate.
+    ///
+    /// The miner records every trailing sequence of the current sentence — up to
+    /// six rows per word — because that is what lets the longest repeated phrase
+    /// win without committing to a length in advance. Skipping those writes was
+    /// tried and is the wrong trade: it makes a phrase wait for its own tail to
+    /// repeat first, so "let me know if that works" needs five repetitions to
+    /// surface instead of two, and the snippet tier is the most-accepted tier
+    /// there is.
+    ///
+    /// The defect was never the writing. It was that nothing ever removed the
+    /// candidates that failed: one real store held 6,387 phrases of which 79 had
+    /// ever been promoted, and the other 6,308 were sightings from months earlier
+    /// that were never going to recur.
+    public static let unrepeatedSnippetLifetime: TimeInterval = 14 * 24 * 60 * 60
+
+    /// The most one-sighting candidates to keep regardless of age.
+    ///
+    /// The age rule alone cannot bound a heavy writing day — everything mined
+    /// this afternoon is hours old and stays. This is the ceiling: past it the
+    /// oldest candidates go, because a phrase typed once and not repeated since
+    /// is the least likely of the set to be the next one repeated.
+    public static let maximumUnrepeatedSnippets = 2000
+
+    /// Discards phrases that were seen once and never again.
+    ///
+    /// Only `count = 1` rows, and never a manual one. A phrase that has repeated
+    /// even twice is evidence of a habit and is kept whatever its age; a phrase
+    /// the user added by hand is not the miner's to discard.
+    ///
+    /// - Returns: how many rows were removed.
+    @discardableResult
+    public func pruneUnrepeatedSnippets(
+        olderThan lifetime: TimeInterval = Store.unrepeatedSnippetLifetime,
+        keepingAtMost cap: Int = Store.maximumUnrepeatedSnippets,
+        now: Date = Date()
+    ) throws -> Int {
+        let before = try countSnippets()
+
+        try database.execute("""
+            DELETE FROM snippet
+            WHERE count = 1 AND source <> 'manual' AND COALESCE(last_used, 0) < ?
+            """, [.real(now.timeIntervalSince1970 - lifetime)])
+
+        // Then the ceiling, oldest first. `rowid` breaks ties so the delete is
+        // deterministic when several rows share a timestamp.
+        try database.execute("""
+            DELETE FROM snippet WHERE rowid IN (
+                SELECT rowid FROM snippet
+                WHERE count = 1 AND source <> 'manual'
+                ORDER BY COALESCE(last_used, 0) DESC, rowid DESC
+                LIMIT -1 OFFSET ?
+            )
+            """, [.integer(Int64(cap))])
+
+        return before - (try countSnippets())
+    }
+
+    private func countSnippets() throws -> Int {
+        Int(try database.query("SELECT COUNT(*) AS n FROM snippet").first?.int("n") ?? 0)
+    }
+
     public func deleteSnippet(_ text: String) throws {
         try database.execute("DELETE FROM snippet WHERE text = ?", [.text(text)])
     }
