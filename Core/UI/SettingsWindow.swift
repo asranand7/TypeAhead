@@ -25,6 +25,7 @@ public final class SettingsWindow: NSObject, NSWindowDelegate {
     /// its ending. This label is the app explaining why it has nothing to suggest
     /// yet, which is exactly the message that must not be cut off.
     private var learnedLabel = NSTextField(wrappingLabelWithString: "")
+    private var blockedEmptyLabel = NSTextField(wrappingLabelWithString: "")
     private var modelTable = NSTableView()
     private var modelStatusLabel = NSTextField(labelWithString: "")
     private var blockTable = NSTableView()
@@ -187,7 +188,7 @@ public final class SettingsWindow: NSObject, NSWindowDelegate {
         modelStatusLabel.textColor = .secondaryLabelColor
         view.addSubview(modelStatusLabel)
 
-        let scroll = NSScrollView(frame: NSRect(x: 24, y: 92, width: 560, height: 280))
+        let scroll = NSScrollView(frame: NSRect(x: 24, y: 112, width: 560, height: 260))
         scroll.hasVerticalScroller = true
         scroll.borderType = .bezelBorder
 
@@ -204,7 +205,7 @@ public final class SettingsWindow: NSObject, NSWindowDelegate {
         scroll.documentView = modelTable
         view.addSubview(scroll)
 
-        downloadProgress.frame = NSRect(x: 24, y: 66, width: 560, height: 16)
+        downloadProgress.frame = NSRect(x: 24, y: 86, width: 560, height: 16)
         downloadProgress.isIndeterminate = false
         downloadProgress.minValue = 0
         downloadProgress.maxValue = 1
@@ -226,8 +227,11 @@ public final class SettingsWindow: NSObject, NSWindowDelegate {
         install.frame = NSRect(x: 286, y: 24, width: 150, height: 30)
         view.addSubview(install)
 
+        // Its own full-width row, under the buttons rather than beside them. At
+        // 150pt in the corner this sentence needed four lines and had two, so it
+        // read "Swapping models never touches what TypeAhead" and stopped.
         view.addSubview(caption("Swapping models never touches what TypeAhead has "
-                                + "learned about you.", x: 446, y: 30, width: 150))
+                                + "learned about you.", x: 24, y: 68, width: 560))
         return view
     }
 
@@ -279,7 +283,7 @@ public final class SettingsWindow: NSObject, NSWindowDelegate {
                                 + "suggests nor learns in them. Password fields are always "
                                 + "excluded everywhere.", x: 24, y: 372, width: 560))
 
-        let scroll = NSScrollView(frame: NSRect(x: 24, y: 72, width: 560, height: 290))
+        let scroll = NSScrollView(frame: NSRect(x: 24, y: 72, width: 560, height: 274))
         scroll.hasVerticalScroller = true
         scroll.borderType = .bezelBorder
 
@@ -292,6 +296,20 @@ public final class SettingsWindow: NSObject, NSWindowDelegate {
         blockTable.delegate = self
         scroll.documentView = blockTable
         view.addSubview(scroll)
+
+        // NSTableView paints its alternating stripes over empty space, so a table
+        // with no rows is grey bands and no explanation — indistinguishable from
+        // a rendering failure. "No apps blocked" is a perfectly good state and
+        // has to look like one.
+        blockedEmptyLabel.stringValue = "No apps are blocked.\n\n"
+            + "TypeAhead is active everywhere except password fields, which are "
+            + "always excluded."
+        blockedEmptyLabel.alignment = .center
+        blockedEmptyLabel.font = .systemFont(ofSize: 12)
+        blockedEmptyLabel.textColor = .secondaryLabelColor
+        blockedEmptyLabel.isSelectable = false
+        blockedEmptyLabel.frame = NSRect(x: 64, y: 180, width: 480, height: 70)
+        view.addSubview(blockedEmptyLabel)
 
         let add = NSButton(title: "Block an app…", target: self, action: #selector(blockApp))
         add.frame = NSRect(x: 24, y: 24, width: 140, height: 30)
@@ -340,6 +358,10 @@ public final class SettingsWindow: NSObject, NSWindowDelegate {
 
         blockedRows = Array(settings.blockedApps).sorted()
         blockTable.reloadData()
+        blockedEmptyLabel.isHidden = !blockedRows.isEmpty
+        // Stripes over nothing read as rows that failed to draw. With the empty
+        // message showing they also sit behind the text.
+        blockTable.usesAlternatingRowBackgroundColors = !blockedRows.isEmpty
     }
 
     private func caption(_ text: String, x: CGFloat, y: CGFloat, width: CGFloat) -> NSTextField {
@@ -483,6 +505,33 @@ public final class SettingsWindow: NSObject, NSWindowDelegate {
     }
 
     @objc private func forgetTypos() {
+        // Asked before, not reported after. The button's ellipsis promises a
+        // dialog by macOS convention and there was none: it deleted on the click
+        // and then told you what it had done, which is the wrong order for
+        // anything that cannot be undone.
+        let doomed = (try? store.unverifiedWords(
+            seenFewerThan: WordHygiene.unknownWordThreshold)) ?? []
+        guard !doomed.isEmpty else {
+            MemoryMenu.inform("Nothing to forget",
+                              "Every unrecognised word has been typed often enough to keep.")
+            return
+        }
+
+        let sample = doomed.prefix(8).joined(separator: ", ")
+        let alert = NSAlert()
+        alert.messageText = doomed.count == 1
+            ? "Forget 1 unrecognised word?"
+            : "Forget \(doomed.count) unrecognised words?"
+        alert.informativeText = "Including: \(sample)"
+            + (doomed.count > 8 ? ", and \(doomed.count - 8) more." : ".")
+            + "\n\nWords you have typed often — names, jargon, Hinglish — are kept. "
+            + "The statistics that referred to the deleted words go with them. "
+            + "This cannot be undone."
+        alert.alertStyle = .warning
+        alert.addButton(withTitle: doomed.count == 1 ? "Forget It" : "Forget Them")
+        alert.addButton(withTitle: "Cancel")
+        guard alert.runModal() == .alertFirstButtonReturn else { return }
+
         let removed = (try? store.forgetUnverified(
             seenFewerThan: WordHygiene.unknownWordThreshold)) ?? 0
         MemoryMenu.inform("Forgot \(removed) words", "Your real vocabulary is untouched.")

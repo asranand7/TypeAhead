@@ -21,14 +21,16 @@ public final class Corrector: SuggestionSource, TypingObserver {
     public static let protectionThreshold = 3
 
     private let store: Store
+    private let hygiene: WordHygiene
     private let lock = NSLock()
 
     private var lastCommittedWord: String?
     private var backspaceRun = 0
     private var deletedWord: String?
 
-    public init(store: Store) {
+    public init(store: Store, hygiene: WordHygiene = WordHygiene()) {
         self.store = store
+        self.hygiene = hygiene
     }
 
     // MARK: - Learning
@@ -87,7 +89,27 @@ public final class Corrector: SuggestionSource, TypingObserver {
 
         guard let deleted, deleted != normalized else { return }
         guard Corrector.isPlausibleTypoFix(from: deleted, to: normalized) else { return }
+        guard isNotBackwards(wrong: deleted, right: normalized) else { return }
         try? store.recordCorrection(wrong: deleted, right: normalized)
+    }
+
+    /// Rejects a pair that has the correction the wrong way round.
+    ///
+    /// The learner watches for "word typed, word deleted, similar word typed" and
+    /// assumes the second one is the fix. Usually true — and false exactly when a
+    /// keystroke goes missing on the retype, which is how a real store came to
+    /// hold "also to alo": the user wrote "also", deleted it, and the replacement
+    /// lost a letter on the way in. Left alone, the app would then offer to turn
+    /// a correctly spelled word into the typo.
+    ///
+    /// The dictionary settles it in the one direction it is trustworthy. If it
+    /// recognises the word that was *deleted* and does not recognise the one that
+    /// replaced it, the pair is inverted and gets dropped. The reverse is not
+    /// asserted: the dictionary not knowing a word means nothing here, because
+    /// names, jargon and Hinglish are exactly what it does not know.
+    private func isNotBackwards(wrong: String, right: String) -> Bool {
+        guard hygiene.isSpelledCorrectly(wrong) else { return true }
+        return hygiene.isSpelledCorrectly(right)
     }
 
     /// Distinguishes a typo fix from a change of mind.
@@ -95,8 +117,26 @@ public final class Corrector: SuggestionSource, TypingObserver {
     /// Rewriting "hello" as "hi" is editing, not correcting, and recording it
     /// would make the app "fix" a perfectly good word later. The edit distance has
     /// to be small relative to the length of what was written.
+    /// Shortest word a correction pair may involve.
+    ///
+    /// Below this the edit-distance budget stops meaning anything: it is
+    /// `max(1, length / 3)`, so for a one-character word it is 1, and *every*
+    /// other single character is within 1 of it. A real store had learned
+    /// "i to s" five times, "w to e", "z to x" and "o to so" — pairs with no
+    /// shared structure at all, produced by dropped keystrokes rather than by
+    /// anyone fixing a typo. At five sightings "i to s" was live, so typing "i"
+    /// offered to replace it with "s".
+    ///
+    /// Three is where a single edit is genuinely the classic typo — "teh" to
+    /// "the", "adn" to "and" — and where a wrong guess is cheap. Two-character
+    /// words are almost all function words, where being wrong is expensive and
+    /// the evidence is weakest.
+    public static let minimumWordLength = 3
+
     public static func isPlausibleTypoFix(from wrong: String, to right: String) -> Bool {
         guard !wrong.isEmpty, !right.isEmpty else { return false }
+        guard wrong.count >= Corrector.minimumWordLength,
+              right.count >= Corrector.minimumWordLength else { return false }
         guard abs(wrong.count - right.count) <= 3 else { return false }
         let distance = editDistance(wrong, right)
         guard distance > 0 else { return false }

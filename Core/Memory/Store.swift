@@ -739,6 +739,16 @@ public final class Store {
     /// left by dropped keystrokes. Their n-grams go too, otherwise the statistics
     /// would still point at words that no longer exist.
     @discardableResult
+    /// The words `forgetUnverified` would remove, without removing them.
+    ///
+    /// So the confirmation can name them. "Forget 41 words?" is a question nobody
+    /// can answer; "Forget 41 words, including anhting, workig, teh?" is.
+    public func unverifiedWords(seenFewerThan threshold: Int) throws -> [String] {
+        try database.query(
+            "SELECT word FROM vocab WHERE kind = 'unverified' AND count < ? ORDER BY count, word",
+            [.integer(Int64(threshold))]).compactMap { $0.string("word") }
+    }
+
     public func forgetUnverified(seenFewerThan threshold: Int) throws -> Int {
         let doomed = try database.query(
             "SELECT id FROM vocab WHERE kind = 'unverified' AND count < ?",

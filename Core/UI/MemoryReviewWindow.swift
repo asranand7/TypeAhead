@@ -173,8 +173,50 @@ public final class MemoryReviewWindow: NSObject, NSWindowDelegate {
         guard let table = tableView else { return }
         let selected = table.selectedRowIndexes.compactMap { rows.indices.contains($0) ? rows[$0] : nil }
         guard !selected.isEmpty else { return }
+        guard confirmDeletion(of: selected) else { return }
         for row in selected { try? row.delete() }
         reload()
+    }
+
+    /// Names what is about to go, and what goes with it.
+    ///
+    /// There was no confirmation at all: a click deleted whatever happened to be
+    /// selected, permanently, with the only warning a line of grey text at the
+    /// bottom of the window. That was thin before and is wrong now — forgetting a
+    /// word no longer removes just the word. It has to take the statistics that
+    /// referred to it and the phrases containing it, because leaving those behind
+    /// re-points them at the next word learned. So the button does more than its
+    /// label suggests, and the dialog is where that gets said.
+    private func confirmDeletion(of selected: [Row]) -> Bool {
+        let sample = selected.prefix(5).map(\.primary).joined(separator: ", ")
+        let alert = NSAlert()
+        alert.messageText = selected.count == 1
+            ? "Forget \u{201C}\(selected[0].primary)\u{201D}?"
+            : "Forget \(selected.count) items?"
+        alert.informativeText = (selected.count > 1 ? "\(sample)"
+            + (selected.count > 5 ? ", and \(selected.count - 5) more.\n\n" : ".\n\n") : "")
+            + consequence(for: scope)
+            + "\n\nThis cannot be undone."
+        alert.alertStyle = .warning
+        alert.addButton(withTitle: "Forget")
+        alert.addButton(withTitle: "Cancel")
+        return alert.runModal() == .alertFirstButtonReturn
+    }
+
+    /// What else disappears, per tier. Only the vocabulary tab cascades.
+    private func consequence(for scope: Scope) -> String {
+        switch scope {
+        case .vocabulary:
+            return "The statistics that predicted from this word go too, along with "
+                + "any phrase containing it — otherwise they would point at whatever "
+                + "word is learned next."
+        case .snippets:
+            return "The phrase stops being suggested. The words in it are kept."
+        case .identity:
+            return "It will no longer be offered as a completion."
+        case .corrections:
+            return "The typo will stop being corrected automatically."
+        }
     }
 
     private func reload() {
@@ -230,6 +272,9 @@ public final class MemoryReviewWindow: NSObject, NSWindowDelegate {
 
         emptyLabel?.stringValue = emptyMessage(for: scope)
         emptyLabel?.isHidden = !rows.isEmpty
+        // See the Apps pane: stripes painted over empty space look like rows that
+        // failed to render, and they sit behind the empty message.
+        tableView?.usesAlternatingRowBackgroundColors = !rows.isEmpty
         countLabel?.stringValue = rows.isEmpty ? "" : summary()
     }
 
